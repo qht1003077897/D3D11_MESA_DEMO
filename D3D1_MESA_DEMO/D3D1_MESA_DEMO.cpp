@@ -1,14 +1,13 @@
 ﻿#include <windows.h>
-#include <d3d10_1.h>
-#include <d3d10.h>
 #include <d3d11.h>
+#include <d3dcompiler.h>
 #include <dxgi.h>
 #include <iostream>
 
 
-#pragma comment(lib, "d3d10.lib")
 #pragma comment(lib, "d3d11.lib")
 #pragma comment(lib, "dxgi.lib")
+#pragma comment(lib, "d3dcompiler.lib")
 #include "KMTInterceptor.h"
 // 顶点结构
 struct SimpleVertex {
@@ -16,10 +15,9 @@ struct SimpleVertex {
     float Color[4];
 };
 
-//
-// HLSL 着色器代码
+// HLSL 着色器代码 for D3D11
 const char* hlslShaderCode = R"(
-    struct VS_INPUT {
+struct VS_INPUT {
         float3 Position : POSITION;
         float4 Color : COLOR;
     };
@@ -31,7 +29,7 @@ const char* hlslShaderCode = R"(
 
     PS_INPUT VS(VS_INPUT input) {
         PS_INPUT output;
-        output.Position = float4(input.Position, 1.0f);
+        output.Position = float4(input.Position,1.0f);
         output.Color = input.Color;
         return output;
     }
@@ -39,75 +37,93 @@ const char* hlslShaderCode = R"(
     float4 PS(PS_INPUT input) : SV_TARGET {
         return input.Color;
     }
-
-    technique10 Render {
-        pass P0 {
-            SetVertexShader(CompileShader(vs_4_0, VS()));
-            SetPixelShader(CompileShader(ps_4_0, PS()));
-            SetGeometryShader(NULL);
-        }
-    }
 )";
 
-class D3D10TriangleRenderer {
+class D3D11TriangleRenderer {
 private:
-    // Direct3D 11
-    ID3D11Device* m_pd3dDevice;                    // D3D11设备
-    ID3D11DeviceContext* m_pd3dImmediateContext;   // D3D11设备上下文
-    IDXGISwapChain* m_pSwapChainD3D11;                  // D3D11交换链
-
-    ID3D10Device* m_pDevice;
+    // D3D11
+    ID3D11Device* m_pd3dDevice;
+    ID3D11DeviceContext* m_pImmediateContext;
     IDXGISwapChain* m_pSwapChain;
-    ID3D10RenderTargetView* m_pRenderTargetView;
-    ID3D10Effect* m_pEffect;
-    ID3D10InputLayout* m_pInputLayout;
-    ID3D10Buffer* m_pVertexBuffer;
-    ID3D10EffectTechnique* m_pTechnique;
+    ID3D11RenderTargetView* m_pRenderTargetView;
+
+    ID3D11InputLayout* m_pInputLayout;
+    ID3D11Buffer* m_pVertexBuffer;
+    ID3D11VertexShader* m_pVertexShader;
+    ID3D11PixelShader* m_pPixelShader;
+
     HWND m_hWnd;
 
 public:
-    D3D10TriangleRenderer() :
-        m_pDevice(nullptr),
+    D3D11TriangleRenderer() :
         m_pd3dDevice(nullptr),
-        m_pd3dImmediateContext(nullptr),
-        m_pSwapChainD3D11(nullptr),
+        m_pImmediateContext(nullptr),
         m_pSwapChain(nullptr),
         m_pRenderTargetView(nullptr),
-        m_pEffect(nullptr),
         m_pInputLayout(nullptr),
         m_pVertexBuffer(nullptr),
-        m_pTechnique(nullptr),
+        m_pVertexShader(nullptr),
+        m_pPixelShader(nullptr),
         m_hWnd(nullptr) {
     }
 
-    ~D3D10TriangleRenderer() {
+    ~D3D11TriangleRenderer() {
         Cleanup();
     }
 
     HRESULT Initialize(HWND hWnd, UINT width, UINT height) {
         m_hWnd = hWnd;
+        std::cout << "Initializing D3D11 renderer..." << std::endl;
 
-        std::cout << "Initializing D3D10 with Gallium backend..." << std::endl;
+        DXGI_SWAP_CHAIN_DESC sd;
+        ZeroMemory(&sd, sizeof(sd));
+        sd.BufferCount = 4;
+        sd.BufferDesc.Width = width;
+        sd.BufferDesc.Height = height;
+        sd.BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        sd.BufferDesc.RefreshRate.Numerator = 60;
+        sd.BufferDesc.RefreshRate.Denominator = 1;
+        sd.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+        sd.OutputWindow = m_hWnd;
+        sd.SampleDesc.Count = 1;
+        sd.SampleDesc.Quality = 0;
+        sd.Windowed = TRUE;
+        sd.SwapEffect = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
 
-        HRESULT hr = InitializeStandard(width, height);
+        UINT createDeviceFlags = D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_DEBUG;
+        D3D_FEATURE_LEVEL featureLevels[] = { D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_10_1, D3D_FEATURE_LEVEL_10_0 };
+        D3D_FEATURE_LEVEL selectedFL;
 
+        HRESULT hr = D3D11CreateDeviceAndSwapChain(
+            NULL,
+            D3D_DRIVER_TYPE_HARDWARE,
+            NULL,
+            createDeviceFlags,
+            featureLevels,
+            ARRAYSIZE(featureLevels),
+            D3D11_SDK_VERSION,
+            &sd,
+            &m_pSwapChain,
+            &m_pd3dDevice,
+            &selectedFL,
+            &m_pImmediateContext
+        );
 
-        if (SUCCEEDED(hr)) {
-            std::cout << "D3D10 initialized successfully!" << std::endl;
+        if (FAILED(hr)) {
+            std::cerr << "D3D11CreateDeviceAndSwapChain failed: " << std::hex << hr << std::endl;
+            return hr;
         }
 
-
+        if (SUCCEEDED(hr)) {
+            return SetupRenderTarget(width, height);
+        }
         return hr;
     }
 
-
     void CheckDriverInfo() {
-        if (!m_pDevice) 
-                return;
-
-        // 获取设备信息
+        if (!m_pd3dDevice) return;
         IDXGIDevice* pDXGIDevice = nullptr;
-        if (SUCCEEDED(m_pDevice->QueryInterface(__uuidof(IDXGIDevice), (void**)&pDXGIDevice))) {
+        if (SUCCEEDED(m_pd3dDevice->QueryInterface(__uuidof(IDXGIDevice), (void**)&pDXGIDevice))) {
             IDXGIAdapter* pAdapter = nullptr;
             if (SUCCEEDED(pDXGIDevice->GetAdapter(&pAdapter))) {
                 DXGI_ADAPTER_DESC desc;
@@ -123,317 +139,167 @@ public:
     }
 
 private:
-    HRESULT InitializeStandard(UINT width, UINT height) {
-        std::cout << "Using standard D3D10 initialization..." << std::endl;
-
-        // 创建交换链描述
-        DXGI_SWAP_CHAIN_DESC swapChainDesc = { 0 };
-        swapChainDesc.BufferCount =1;
-        swapChainDesc.BufferDesc.Width = width;
-        swapChainDesc.BufferDesc.Height = height;
-        swapChainDesc.BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-        swapChainDesc.BufferDesc.RefreshRate.Numerator = 60;
-        swapChainDesc.BufferDesc.RefreshRate.Denominator = 1;
-        swapChainDesc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
-        swapChainDesc.OutputWindow = m_hWnd;
-        swapChainDesc.SampleDesc.Count = 1;
-        swapChainDesc.SampleDesc.Quality = 0;
-        swapChainDesc.Windowed = TRUE;
-        swapChainDesc.SwapEffect = DXGI_SWAP_EFFECT_SEQUENTIAL;
-        HRESULT hr;
-        //HMODULE hGallium = LoadLibraryA("rosumd.dll");
-        //if (!hGallium) {
-        //    std::wcout << "rosumd load not success!";
-        //}
-        //else 
-        {
-            // 特性等级数组
-            D3D_FEATURE_LEVEL featureLevels[] = {
-            D3D_FEATURE_LEVEL_11_1,
-            D3D_FEATURE_LEVEL_11_0,
-            D3D_FEATURE_LEVEL_10_1,
-            D3D_FEATURE_LEVEL_10_0,
-            D3D_FEATURE_LEVEL_9_3,
-            D3D_FEATURE_LEVEL_9_1
-            };
-            UINT numFeatureLevels = ARRAYSIZE(featureLevels);
-            D3D_FEATURE_LEVEL selectedFeatureLevel;
-
-            //UINT createDeviceFlags = D3D11_CREATE_DEVICE_BGRA_SUPPORT;
-            //createDeviceFlags |= D3D11_CREATE_DEVICE_DEBUG;
-            //    hr = D3D11CreateDevice(
-            //        nullptr, 
-            //        D3D_DRIVER_TYPE_HARDWARE, 
-            //        nullptr, 
-            //        createDeviceFlags, 
-            //        featureLevels,
-            //        ARRAYSIZE(featureLevels),
-            //        D3D11_SDK_VERSION,      
-            //        &m_pd3dDevice, 
-            //        &selectedFeatureLevel,
-            //        &m_pd3dImmediateContext);
-
-            //    if (SUCCEEDED(hr))
-            //    {
-            //        std::cout << "D3D11设备创建成功!" << std::endl;
-            //        std::cout << "驱动类型: " << D3D_DRIVER_TYPE_HARDWARE << std::endl;
-            //    }
-
-            //UINT createDeviceFlags = D3D10_CREATE_DEVICE_BGRA_SUPPORT;
-            //createDeviceFlags |= D3D10_CREATE_DEVICE_DEBUG;
-            hr = D3D10CreateDeviceAndSwapChain(
-                NULL, // 使用默认适配器
-                D3D10_DRIVER_TYPE_HARDWARE,
-                NULL,
-                0, // 标志
-                D3D10_SDK_VERSION,
-                &swapChainDesc,
-                &m_pSwapChain,
-                &m_pDevice
-            );
-        }
-
-        if (SUCCEEDED(hr)) {
-            return SetupRenderTarget(width, height);
-        }
-
-        return hr;
-    }
-
-    bool IsGalliumAdapter(const DXGI_ADAPTER_DESC& desc) {
-        // 检查适配器描述，识别 Gallium 驱动
-        // 这里需要根据您的 Gallium 驱动的实际特征来识别
-
-        std::wstring adapterName = desc.Description;
-        std::wcout << "LLVM?= " << adapterName;
-        // 示例检查：通过名称识别
-        if (adapterName.find(L"Gallium") != std::wstring::npos ||
-            adapterName.find(L"LLVM") != std::wstring::npos ||
-            adapterName.find(L"Mesa") != std::wstring::npos) {
-            return true;
-        }
-
-        // 或者通过 VendorID 识别
-        if (desc.VendorId == 0x1002 || // AMD
-            desc.VendorId == 0x10DE || // NVIDIA
-            desc.VendorId == 0x8086) { // Intel
-            // 这些可能是 Gallium 驱动的目标硬件
-            return true;
-        }
-
-        return false;
-    }
-
-    /**
-        你可以把这个过程想象成一个艺术画廊的布展流程：
-
-        交换链（SwapChain）：就像一个拥有多个画室的画廊管理员。每个画室（Back Buffer）里都有一个空画布（Texture2D）。
-
-        GetBuffer：你向管理员申请：“请把1号画室的钥匙给我（GetBuffer(0, ...)）”。管理员把钥匙（ID3D11Texture2D）交给你。
-
-        CreateRenderTargetView：你拿着钥匙进入画室，然后为这个画布安装一个特制的“画框”（RTV）。这个画框定义了绘画的有效区域和方式。
-
-        OMSetRenderTargets：你告诉你的画家团队（D3D11 Device Context）：“接下来所有的创作，都请直接画在这个带画框的画布上”。
-
-        绘制：画家团队开始在画布上作画。
-
-        Present：绘画完成后，你把钥匙还给管理员，并说：“可以展出了！”。管理员就会将1号画室（现在的后台缓冲区）和0号画室（现在的前台缓冲区，即屏幕）进行“交换”，让观众看到新画作。
-
-        如果没有 GetBuffer 这一步，你的渲染管线就无法知道应该把图形绘制到交换链管理的哪一个具体的纹理资源上。
-    */
     HRESULT SetupRenderTarget(UINT width, UINT height) {
-        // 创建渲染目标视图
-        ID3D10Texture2D* pBackBuffer = nullptr;
-        HRESULT hr = m_pSwapChain->GetBuffer(0, __uuidof(ID3D10Texture2D), (LPVOID*)&pBackBuffer);//后台缓冲区索引
+        ID3D11Texture2D* pBackBuffer = nullptr;
+        HRESULT hr = m_pSwapChain->GetBuffer(0, __uuidof(ID3D11Texture2D), (LPVOID*)&pBackBuffer);
         if (FAILED(hr)) {
             std::cerr << "Failed to get back buffer: " << std::hex << hr << std::endl;
             return hr;
         }
 
-        hr = m_pDevice->CreateRenderTargetView(pBackBuffer, NULL, &m_pRenderTargetView);
+        hr = m_pd3dDevice->CreateRenderTargetView(pBackBuffer, NULL, &m_pRenderTargetView);
         pBackBuffer->Release();
         if (FAILED(hr)) {
             std::cerr << "Failed to create render target view: " << std::hex << hr << std::endl;
             return hr;
         }
 
-        m_pDevice->OMSetRenderTargets(1, &m_pRenderTargetView, NULL);
+        m_pImmediateContext->OMSetRenderTargets(1, &m_pRenderTargetView, NULL);
 
-        // 设置视口
-        D3D10_VIEWPORT viewport;
-        viewport.Width = width;
-        viewport.Height = height;
-        viewport.MinDepth = 0.0f;
-        viewport.MaxDepth = 1.0f;
-        viewport.TopLeftX = 0;
-        viewport.TopLeftY = 0;
-        m_pDevice->RSSetViewports(1, &viewport);
+        D3D11_VIEWPORT vp;
+        vp.Width = (FLOAT)width;
+        vp.Height = (FLOAT)height;
+        vp.MinDepth = 0.0f;
+        vp.MaxDepth = 1.0f;
+        vp.TopLeftX = 0;
+        vp.TopLeftY = 0;
+        m_pImmediateContext->RSSetViewports(1, &vp);
 
         return InitializeShaders();
     }
 
     HRESULT InitializeShaders() {
-        std::cout << "Initializing shaders..." << std::endl;
+        std::cout << "Compiling shaders..." << std::endl;
+        ID3DBlob* vsBlob = nullptr;
+        ID3DBlob* psBlob = nullptr;
+        ID3DBlob* errBlob = nullptr;
 
-        // 编译着色器
-        ID3D10Blob* pErrorBlob = nullptr;
-        ID3D10Blob* pShaderBlob = nullptr;
-
-        HRESULT hr = D3D10CompileEffectFromMemory(
-            (void*)hlslShaderCode,
-            strlen(hlslShaderCode),
-            "Shader",
-            nullptr,
-            nullptr,
-            0,
-            0,
-            &pShaderBlob,
-            &pErrorBlob
-        );
-
+        // Compile vertex shader
+        HRESULT hr = D3DCompile(hlslShaderCode, strlen(hlslShaderCode), nullptr, nullptr, nullptr, "VS", "vs_5_0", 0, 0, &vsBlob, &errBlob);
         if (FAILED(hr)) {
-            if (pErrorBlob) {
-                std::cerr << "Shader compilation error: " << (char*)pErrorBlob->GetBufferPointer() << std::endl;
-                pErrorBlob->Release();
+            if (errBlob) {
+                std::cerr << "Vertex shader compile error: " << (char*)errBlob->GetBufferPointer() << std::endl;
+                errBlob->Release();
             }
             return hr;
         }
 
-        hr = D3D10CreateEffectFromMemory(
-            pShaderBlob->GetBufferPointer(),
-            pShaderBlob->GetBufferSize(),
-            0,
-            m_pDevice,
-            nullptr,
-            &m_pEffect
-        );
-
-        if (pShaderBlob) pShaderBlob->Release();
-        if (pErrorBlob) pErrorBlob->Release();
-
+        // Compile pixel shader
+        hr = D3DCompile(hlslShaderCode, strlen(hlslShaderCode), nullptr, nullptr, nullptr, "PS", "ps_5_0", 0, 0, &psBlob, &errBlob);
         if (FAILED(hr)) {
-            std::cerr << "Failed to create effect: " << std::hex << hr << std::endl;
+            if (errBlob) {
+                std::cerr << "Pixel shader compile error: " << (char*)errBlob->GetBufferPointer() << std::endl;
+                errBlob->Release();
+            }
+            if (vsBlob) vsBlob->Release();
             return hr;
         }
 
-        // 获取技术
-        m_pTechnique = m_pEffect->GetTechniqueByName("Render");
-        if (!m_pTechnique || !m_pTechnique->IsValid()) {
-            std::cerr << "Failed to get technique" << std::endl;
-            return E_FAIL;
+        hr = m_pd3dDevice->CreateVertexShader(vsBlob->GetBufferPointer(), vsBlob->GetBufferSize(), nullptr, &m_pVertexShader);
+        if (FAILED(hr)) {
+            std::cerr << "CreateVertexShader failed: " << std::hex << hr << std::endl;
+            vsBlob->Release(); psBlob->Release();
+            return hr;
         }
 
-        // 创建输入布局
-        D3D10_INPUT_ELEMENT_DESC layout[] = {
-            { "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D10_INPUT_PER_VERTEX_DATA, 0 },
-            { "COLOR", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 12, D3D10_INPUT_PER_VERTEX_DATA, 0 }
+        hr = m_pd3dDevice->CreatePixelShader(psBlob->GetBufferPointer(), psBlob->GetBufferSize(), nullptr, &m_pPixelShader);
+        if (FAILED(hr)) {
+            std::cerr << "CreatePixelShader failed: " << std::hex << hr << std::endl;
+            vsBlob->Release(); psBlob->Release();
+            return hr;
+        }
+
+        // Define input layout
+        D3D11_INPUT_ELEMENT_DESC layoutDesc[] = {
+            { "POSITION",0, DXGI_FORMAT_R32G32B32_FLOAT,0,0, D3D11_INPUT_PER_VERTEX_DATA,0 },
+            { "COLOR",0, DXGI_FORMAT_R32G32B32A32_FLOAT,0,12, D3D11_INPUT_PER_VERTEX_DATA,0 }
         };
-        UINT numElements = sizeof(layout) / sizeof(layout[0]);
 
-        D3D10_PASS_DESC passDesc;
-        m_pTechnique->GetPassByIndex(0)->GetDesc(&passDesc);
-
-        hr = m_pDevice->CreateInputLayout(
-            layout,
-            numElements,
-            passDesc.pIAInputSignature,
-            passDesc.IAInputSignatureSize,
-            &m_pInputLayout
-        );
-
+        hr = m_pd3dDevice->CreateInputLayout(layoutDesc, ARRAYSIZE(layoutDesc), vsBlob->GetBufferPointer(), vsBlob->GetBufferSize(), &m_pInputLayout);
+        vsBlob->Release();
         if (FAILED(hr)) {
-            std::cerr << "Failed to create input layout: " << std::hex << hr << std::endl;
+            std::cerr << "CreateInputLayout failed: " << std::hex << hr << std::endl;
+            psBlob->Release();
             return hr;
         }
 
-        m_pDevice->IASetInputLayout(m_pInputLayout);
+        m_pImmediateContext->IASetInputLayout(m_pInputLayout);
 
-        return CreateVertexBuffer();
-    }
-
-    HRESULT CreateVertexBuffer() {
-        std::cout << "Creating vertex buffer..." << std::endl;
-
-        // 定义三角形的顶点数据
+        // Create vertex buffer
         SimpleVertex vertices[] = {
-            // 位置              // 颜色 (RGBA)
-            { { 0.0f, 0.5f, 0.0f },  { 1.0f, 0.0f, 0.0f, 1.0f } },   // 顶点 0: 红色
-            { { 0.5f, -0.5f, 0.0f }, { 0.0f, 1.0f, 0.0f, 1.0f } },   // 顶点 1: 绿色
-            { { -0.5f, -0.5f, 0.0f },{ 0.0f, 0.0f, 1.0f, 1.0f } }    // 顶点 2: 蓝色
+            { {0.0f,0.5f,0.0f }, {1.0f,0.0f,0.0f,1.0f } },
+            { {0.5f, -0.5f,0.0f }, {0.0f,1.0f,0.0f,1.0f } },
+            { { -0.5f, -0.5f,0.0f },{0.0f,0.0f,1.0f,1.0f } }
         };
 
-        // 创建顶点缓冲区
-        D3D10_BUFFER_DESC bufferDesc;
-        bufferDesc.Usage = D3D10_USAGE_DEFAULT;
-        bufferDesc.ByteWidth = sizeof(SimpleVertex) * 3;
-        bufferDesc.BindFlags = D3D10_BIND_VERTEX_BUFFER;
-        bufferDesc.CPUAccessFlags = 0;
-        bufferDesc.MiscFlags = 0;
+        D3D11_BUFFER_DESC bd;
+        ZeroMemory(&bd, sizeof(bd));
+        bd.Usage = D3D11_USAGE_DEFAULT;
+        bd.ByteWidth = sizeof(SimpleVertex) * 3;
+        bd.BindFlags = D3D11_BIND_VERTEX_BUFFER;
+        bd.CPUAccessFlags = 0;
 
-        D3D10_SUBRESOURCE_DATA initData;
+        D3D11_SUBRESOURCE_DATA initData;
         initData.pSysMem = vertices;
-        initData.SysMemPitch = 0;
-        initData.SysMemSlicePitch = 0;
 
-        HRESULT hr = m_pDevice->CreateBuffer(&bufferDesc, &initData, &m_pVertexBuffer);
+        hr = m_pd3dDevice->CreateBuffer(&bd, &initData, &m_pVertexBuffer);
         if (FAILED(hr)) {
-            std::cerr << "Failed to create vertex buffer: " << std::hex << hr << std::endl;
+            std::cerr << "CreateBuffer failed: " << std::hex << hr << std::endl;
+            psBlob->Release();
             return hr;
         }
 
-        std::cout << "Vertex buffer created successfully!" << std::endl;
+        psBlob->Release();
+
+        // Set shaders
+        m_pImmediateContext->VSSetShader(m_pVertexShader, nullptr, 0);
+        m_pImmediateContext->PSSetShader(m_pPixelShader, nullptr, 0);
+
         return S_OK;
     }
 
 public:
     void Render() {
-        if (!m_pDevice) return;
+        if (!m_pd3dDevice) return;
 
-        // 清除渲染目标为深蓝色
-        float clearColor[4] = { 0.0f, 0.125f, 0.3f, 1.0f };
-        m_pDevice->ClearRenderTargetView(m_pRenderTargetView, clearColor);
+        m_pImmediateContext->OMSetRenderTargets(1, &m_pRenderTargetView, NULL);
+        float clearColor[4] = { 0.0f,0.125f,0.3f,1.0f };
+        m_pImmediateContext->ClearRenderTargetView(m_pRenderTargetView, clearColor);
 
-        // 设置顶点缓冲区
         UINT stride = sizeof(SimpleVertex);
         UINT offset = 0;
-        m_pDevice->IASetVertexBuffers(0, 1, &m_pVertexBuffer, &stride, &offset);
-        m_pDevice->IASetPrimitiveTopology(D3D10_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        m_pImmediateContext->IASetVertexBuffers(0, 1, &m_pVertexBuffer, &stride, &offset);
+        m_pImmediateContext->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
-        // 应用技术并绘制
-        D3D10_TECHNIQUE_DESC techDesc;
-        m_pTechnique->GetDesc(&techDesc);
 
-        for (UINT p = 0; p < techDesc.Passes; ++p) {
-            m_pTechnique->GetPassByIndex(p)->Apply(0);
-            m_pDevice->Draw(3, 0);  // 绘制3个顶点（一个三角形）
-        }
+        m_pImmediateContext->Draw(3, 0);
 
-        // 呈现到屏幕 DXGI_DDI_FLIP_INTERVAL_IMMEDIATE
-
-        HRESULT hr = m_pSwapChain->Present(0, DXGI_PRESENT_DO_NOT_WAIT);
+        HRESULT hr = m_pSwapChain->Present(0, 0);
         if (hr == DXGI_STATUS_OCCLUDED) {
             std::cout << "DXGI_STATUS_OCCLUDED." << std::endl;
-            // 应用程序被遮挡，不需要实际呈现
-            return; // 跳过实际Present调用
+            return;
         }
     }
 
     void Cleanup() {
-        std::cout << "Cleaning up resources..." << std::endl;
-
+        std::cout << "Cleaning up D3D11 resources..." << std::endl;
         if (m_pVertexBuffer) m_pVertexBuffer->Release();
         if (m_pInputLayout) m_pInputLayout->Release();
-        if (m_pEffect) m_pEffect->Release();
+        if (m_pPixelShader) m_pPixelShader->Release();
+        if (m_pVertexShader) m_pVertexShader->Release();
         if (m_pRenderTargetView) m_pRenderTargetView->Release();
         if (m_pSwapChain) m_pSwapChain->Release();
-        if (m_pDevice) m_pDevice->Release();
+        if (m_pImmediateContext) m_pImmediateContext->Release();
+        if (m_pd3dDevice) m_pd3dDevice->Release();
 
         m_pVertexBuffer = nullptr;
         m_pInputLayout = nullptr;
-        m_pEffect = nullptr;
+        m_pPixelShader = nullptr;
+        m_pVertexShader = nullptr;
         m_pRenderTargetView = nullptr;
         m_pSwapChain = nullptr;
-        m_pDevice = nullptr;
+        m_pImmediateContext = nullptr;
+        m_pd3dDevice = nullptr;
 
         std::cout << "Cleanup completed!" << std::endl;
     }
@@ -464,8 +330,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     freopen("CONOUT$", "w", stdout);
     freopen("CONOUT$", "w", stderr);
 
-    std::cout << "Starting D3D10 Triangle Renderer..." << std::endl;
-    //std::cout << "Expected call path: App -> D3D10 Runtime -> Gallium Driver" << std::endl;
+    std::cout << "Starting D3D11 Triangle Renderer..." << std::endl;
 
     // 注册窗口类
     WNDCLASSEXW wcex = { 0 };
@@ -475,7 +340,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     wcex.hInstance = hInstance;
     wcex.hCursor = LoadCursor(nullptr, IDC_ARROW);
     wcex.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
-    wcex.lpszClassName = L"D3D10WindowClass";
+    wcex.lpszClassName = L"D3D11WindowClass";
 
     if (!RegisterClassExW(&wcex)) {
         MessageBoxW(nullptr, L"Window Registration Failed!", L"Error!", MB_ICONEXCLAMATION | MB_OK);
@@ -485,8 +350,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     // 创建窗口
     HWND hWnd = CreateWindowExW(
         0,
-        L"D3D10WindowClass",
-        L"D3D10 Triangle (App -> D3D10 Runtime -> Gallium Driver) - Press ESC to exit",
+        L"D3D11WindowClass",
+        L"D3D11 Triangle (App -> D3D11 Runtime) - Press ESC to exit",
         WS_OVERLAPPEDWINDOW,
         CW_USEDEFAULT, CW_USEDEFAULT, 800, 600,
         nullptr, nullptr, hInstance, nullptr
@@ -502,18 +367,16 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
     KMTInterceptor::Initialize();
 
-    // 初始化 D3D10 渲染器
-    D3D10TriangleRenderer renderer;
+    // 初始化 D3D11 渲染器
+    D3D11TriangleRenderer renderer;
     HRESULT hr = renderer.Initialize(hWnd, 800, 600);
     if (FAILED(hr)) {
-        MessageBoxW(hWnd, L"Failed to initialize D3D10!", L"Error!", MB_ICONEXCLAMATION | MB_OK);
+        MessageBoxW(hWnd, L"Failed to initialize D3D11!", L"Error!", MB_ICONEXCLAMATION | MB_OK);
         return 0;
     }
 
     renderer.CheckDriverInfo();
     std::cout << "Renderer initialized successfully! Starting main loop..." << std::endl;
-
-
 
     // 主消息循环
     MSG msg = { 0 };
